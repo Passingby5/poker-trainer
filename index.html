@@ -169,6 +169,27 @@ body.limit{--ctlH:132px}
 }
 
 .faceimg{width:100%;height:100%;display:block;object-fit:cover;background:#1e3a2a}
+/* ---------- bankroll (home screen, history, confirm) ---------- */
+.ver{font-size:13px;color:#8fa3b3;margin:-2px 0 8px}
+.bank{background:#13324a;border:2px solid #2e86c1;border-radius:14px;padding:10px 12px;margin:6px 0 10px}
+.bankrow{display:flex;align-items:baseline;justify-content:space-between;gap:10px;font-size:19px}
+.bankrow b{font-size:30px;color:#7dff9a}.bankrow b.bad{color:#ff8a80}
+.banksub{font-size:15px;color:#cfe3f3;margin:2px 0 8px}
+.bankbtns,.btnline{display:flex;gap:10px;flex-wrap:wrap}
+.bankbtns button{flex:1 1 140px;min-height:52px;font-size:18px}
+.banknote{margin-top:8px;font-size:15px;color:#ffe082}
+button.warnbtn{background:#7b241c}button.go{background:#1e8449}
+.btnline button{flex:1 1 150px}
+table.hist{width:100%;border-collapse:collapse;font-size:16px}
+table.hist th{text-align:left;color:#9ad1ff;border-bottom:2px solid #3d566e;padding:4px}
+table.hist td{padding:6px 4px;border-bottom:1px solid rgba(255,255,255,.08);vertical-align:top}
+table.hist td small{display:block;color:#8fa3b3;font-size:13px}
+table.hist td:nth-child(2),table.hist td:nth-child(3),table.hist th:nth-child(2),table.hist th:nth-child(3){text-align:right;white-space:nowrap}
+table.hist tr.hrestart td{color:#ffe082;font-style:italic}
+#infoBar .bk{display:none}
+@media (max-width:600px){#infoBar{line-height:1.15}#infoBar .bk{display:block;font-size:14px;color:#ffe082;overflow:hidden;text-overflow:ellipsis}}
+#lsBank{display:none}
+@media (orientation:landscape) and (max-height:520px){body.bankon #lsBank{display:block;flex:none;height:17px;font-size:13px;font-weight:700;color:#ffe082;text-align:center;white-space:nowrap;overflow:hidden;line-height:1.2}body.bankon #statusLine{flex:none}body.bankon #lsTalk{flex:none;height:16px;white-space:nowrap;text-overflow:ellipsis}body.bankon .act{min-height:38px}}
 </style></head>
 <body>
 <div id="app">
@@ -189,6 +210,7 @@ body.limit{--ctlH:132px}
 <div id="strip" role="status" title="Tap for the full review and coach advice"><div id="stripMain">This hand</div><div id="stripLast"></div></div>
 <div id="controls">
   <div id="lsBar"><div id="lsInfo"></div><div class="lsbtns"><button id="btnCoachL" aria-label="Coach on or off">&#127891;</button><button id="btnInfoL" aria-label="Info">&#128202;</button><button id="btnMenuL" aria-label="Menu">&#9776;</button></div></div>
+  <div id="lsBank"></div>
   <div id="statusLine">Press Start to begin.</div>
   <div id="lsTalk"></div>
   <div class="row" id="actRow">
@@ -1394,6 +1416,108 @@ function img(id, expr) {
 return { svg: svg, img: img, src: src, fallback: fallback, EXPRS: EXPRS, ids: Object.keys(C) };
 })();
 </script>
+<script id="bankroll">
+/* ===== Bankroll: cash-game money that carries over between sessions (saved on this device) =====
+   Pure logic, no DOM. The UI calls load/save with localStorage; tests call them with a fake storage.
+
+   How money moves:
+   - balance      = money in the bankroll, not on a table
+   - table.chips  = your chips on the cash table (saved after every action and every hand)
+   - table.paidIn = total taken from the bankroll for this session (buy-in plus rebuys)
+   Mid-hand close rule: while a hand is running, table.chips is your stack BEHIND (chips not yet in the pot).
+   So closing the app mid-hand counts like folding: chips already in the pot are lost, never refunded.
+   As soon as a hand ends the final stack (with any winnings) is saved before the animations play.
+   Next time the app opens, an open table is cashed out into the bankroll and noted in the history. */
+var Bankroll = (function () {
+  'use strict';
+  var KEY = 'pokerTrainer.bankroll', VERSION = 1, START = 10000, BUYIN = 500, SB = 2, BB = 5, HIST_MAX = 200;
+
+  function whole(x) { x = Math.floor(Number(x)); return isFinite(x) && x > 0 ? x : 0; }
+  function fresh(now) { return { v: VERSION, balance: START, table: null, history: [], created: now || Date.now(), restarts: 0 }; }
+  function cleanTable(t) {
+    if (!t || typeof t !== 'object') return null;
+    return { chips: whole(t.chips), paidIn: whole(t.paidIn != null ? t.paidIn : t.chips), rebuys: whole(t.rebuys), started: Number(t.started) || 0, hands: whole(t.hands) };
+  }
+  function cleanEntry(e) {
+    if (!e || typeof e !== 'object') return null;
+    var kind = e.kind === 'restart' || e.kind === 'fresh' ? e.kind : 'session';
+    return { kind: kind, date: Number(e.date) || 0, paidIn: whole(e.paidIn), cashOut: whole(e.cashOut), result: Math.round(Number(e.result) || 0),
+      balance: whole(e.balance), rebuys: whole(e.rebuys), hands: whole(e.hands), how: String(e.how || '') };
+  }
+  /* Accepts anything found in storage and returns a valid current-version save.
+     v0 (no "v" field, e.g. a bare number or {balance}) and v1 are understood; junk gives a fresh $10,000 start. */
+  function migrate(raw, now) {
+    if (raw == null) return fresh(now);
+    if (typeof raw === 'number' || typeof raw === 'string') { var n = Number(raw); if (!isFinite(n)) return fresh(now); raw = { balance: n }; }
+    if (typeof raw !== 'object' || Array.isArray(raw)) return fresh(now);
+    var s = fresh(now);
+    if (raw.balance != null) s.balance = whole(raw.balance);
+    s.table = cleanTable(raw.table);
+    s.history = Array.isArray(raw.history) ? raw.history.map(cleanEntry).filter(Boolean).slice(0, HIST_MAX) : [];
+    s.created = Number(raw.created) || s.created;
+    s.restarts = whole(raw.restarts);
+    return s;
+  }
+  function load(storage, now) {
+    var raw = null;
+    try { var txt = storage.getItem(KEY); raw = txt == null ? null : JSON.parse(txt); } catch (e) { raw = null; }
+    return migrate(raw, now);
+  }
+  function save(storage, s) { try { storage.setItem(KEY, JSON.stringify(s)); return true; } catch (e) { return false; } }
+
+  function total(s) { return s.balance + (s.table ? s.table.chips : 0); }
+  function isBroke(s) { return s.balance <= 0 && (!s.table || s.table.chips <= 0); }
+  function nextBuyIn(s) { return Math.min(BUYIN, s.balance); }
+
+  /* Sit down: takes $500 (or whatever is left if less) out of the bankroll. Returns the amount, or 0 if broke. */
+  function buyIn(s, now) {
+    if (s.table) cashOut(s, now, 'left');
+    var amt = nextBuyIn(s);
+    if (amt <= 0) return 0;
+    s.balance -= amt;
+    s.table = { chips: amt, paidIn: amt, rebuys: 0, started: now || Date.now(), hands: 0 };
+    return amt;
+  }
+  /* Busted at the table: another $500 (or what is left) from the bankroll. Returns the amount, or 0. */
+  function rebuy(s) {
+    if (!s.table) return 0;
+    var amt = nextBuyIn(s);
+    if (amt <= 0) return 0;
+    s.balance -= amt; s.table.chips += amt; s.table.paidIn += amt; s.table.rebuys++;
+    return amt;
+  }
+  /* Record the current table stack (stack behind during a hand, full stack between hands). */
+  function setChips(s, chips, handDone) {
+    if (!s.table) return;
+    s.table.chips = whole(chips);
+    if (handDone) s.table.hands++;
+  }
+  /* Leave the table: chips go back into the bankroll and the session goes into the history. */
+  function cashOut(s, now, how) {
+    if (!s.table) return null;
+    var t = s.table;
+    s.balance += t.chips;
+    var e = { kind: 'session', date: now || Date.now(), paidIn: t.paidIn, cashOut: t.chips, result: t.chips - t.paidIn, balance: s.balance, rebuys: t.rebuys, hands: t.hands, how: how || 'left' };
+    s.history.unshift(e);
+    if (s.history.length > HIST_MAX) s.history.length = HIST_MAX;
+    s.table = null;
+    return e;
+  }
+  /* On app start: a table left open (app closed or reloaded) is cashed out with the last saved chips. */
+  function recover(s, now) { return s.table ? cashOut(s, now, 'closed') : null; }
+  /* Back to $10,000. kind 'restart' = Restart button (after confirm), 'fresh' = new start after going broke. */
+  function restart(s, now, kind) {
+    if (s.table) cashOut(s, now, 'left');
+    s.balance = START; s.restarts++;
+    s.history.unshift({ kind: kind === 'fresh' ? 'fresh' : 'restart', date: now || Date.now(), paidIn: 0, cashOut: 0, result: 0, balance: START, rebuys: 0, hands: 0, how: '' });
+    if (s.history.length > HIST_MAX) s.history.length = HIST_MAX;
+    return s;
+  }
+  return { KEY: KEY, VERSION: VERSION, START: START, BUYIN: BUYIN, SB: SB, BB: BB, fresh: fresh, migrate: migrate, load: load, save: save,
+    total: total, isBroke: isBroke, nextBuyIn: nextBuyIn, buyIn: buyIn, rebuy: rebuy, setChips: setChips, cashOut: cashOut, recover: recover, restart: restart };
+})();
+if (typeof module !== 'undefined' && module.exports) module.exports = Bankroll;
+</script>
 <script id="ui">
 /* ===== UI layer (browser only) ===== */
 (function () {
@@ -1416,6 +1540,21 @@ var settings = load(LS_SET, { numOpp: 6, betting: 'nl', talk: 'some', mode: 'cas
 var BLANK_STATS = { hands: 0, net: 0, biggestPot: 0, vpip: 0, pfr: 0, won: 0, sd: 0, sdWon: 0, rebuys: 0, mistakes: 0, decisions: 0, games: 0 };
 var allStats = load(LS_STATS, BLANK_STATS);
 var sess = Object.assign({}, BLANK_STATS);
+
+/* ---------- bankroll (cash games only; see src/bankroll.js) ---------- */
+var APP_VERSION = 'v2 - Nov 18 - 679264d';
+var STORE = (function () { try { var t = window.localStorage; t.getItem('x'); return t; } catch (e) { var m = {}; return { getItem: function (k) { return k in m ? m[k] : null; }, setItem: function (k, v) { m[k] = String(v); } }; } })();
+var BR = Bankroll.load(STORE, Date.now());
+var brNote = Bankroll.recover(BR, Date.now()); // a table left open last time (app closed) is cashed out now
+Bankroll.save(STORE, BR);
+function saveBR() { Bankroll.save(STORE, BR); }
+function onCashTable() { return !!(G && G.bankroll && BR.table); }
+// stack behind during a hand (chips in the pot are not counted), full stack once the hand is over
+function syncChips(handDone) { if (!onCashTable()) return; Bankroll.setChips(BR, G.players[HS].stack, handDone); saveBR(); }
+function leaveTable(how) { if (G) G.bankroll = false; if (BR.table) { Bankroll.cashOut(BR, Date.now(), how || 'left'); saveBR(); } }
+// one action per tap: ignores double taps for a short moment
+function tap(fn) { var busy = false; return function () { if (busy) return; busy = true; setTimeout(function () { busy = false; }, 600); return fn.apply(this, arguments); }; }
+function signed(n) { return (n > 0 ? '+' : n < 0 ? '-' : '') + money(Math.abs(n)); }
 
 /* ---------- state ---------- */
 var G = null, HS = 0, loopGen = 0, humanResolve = null, nextResolve = null, modalResolve = null;
@@ -1676,9 +1815,12 @@ function renderInfoBar() {
   } else {
     var net = me.stack - me.buyIns;
     t += ' \u00B7 ' + (narrow ? '' : 'Your net: ') + '<b style="color:' + (net >= 0 ? '#7dff9a' : '#ff8a80') + '">' + (net >= 0 ? '+' : '-') + money(Math.abs(net)) + '</b>';
+    if (G.bankroll) t += narrow ? '<span class="bk">Bank ' + money(BR.balance) + '</span>' : ' \u00B7 Bank ' + money(BR.balance);
   }
   $('infoBar').innerHTML = t;
-  var net2 = me.stack - me.buyIns; $('lsInfo').innerHTML = '#' + G.handNo + (G.limit ? ' Limit' : '') + '<br>' + (G.mode === 'tournament' ? money(me.stack) : '<b style="color:' + (net2 >= 0 ? '#7dff9a' : '#ff8a80') + '">' + (net2 >= 0 ? '+' : '-') + money(Math.abs(net2)) + '</b>');
+  var net2 = me.stack - me.buyIns, netH = '<b style="color:' + (net2 >= 0 ? '#7dff9a' : '#ff8a80') + '">' + (net2 >= 0 ? '+' : '-') + money(Math.abs(net2)) + '</b>';
+  $('lsInfo').innerHTML = '#' + G.handNo + (G.limit ? ' Limit' : '') + '<br>' + (G.mode === 'tournament' ? money(me.stack) : netH);
+  $('lsBank').textContent = G.bankroll ? 'Bankroll ' + money(BR.balance) : ''; document.body.classList.toggle('bankon', !!G.bankroll);
 }
 function legalForHuman() { return E.legalActions(G, HS); }
 function renderControls() {
@@ -1806,7 +1948,7 @@ async function drain(gen) {
     switch (ev.type) {
       case 'newhand':
         var me = G.players[HS];
-        log('Hand #' + ev.handNo + ' \u2014 Dealer: ' + esc(G.players[ev.button].name) + ' \u2014 Blinds ' + money(G.sb) + '/' + money(G.bb), 'hh');
+        log('Hand #' + ev.handNo + ' \u00B7 Dealer: ' + esc(G.players[ev.button].name) + ' \u00B7 Blinds ' + money(G.sb) + '/' + money(G.bb), 'hh');
         if (me.hole.length === 2) log('Your cards: ' + minis(me.hole) + ' (' + E.positionInfo(G, HS).name + ')');
         break;
       case 'post': log(esc(youify(ev.text))); break;
@@ -1893,7 +2035,17 @@ async function gameLoop() {
     await drain(gen);
     if (gen !== loopGen) return;
     if (G.mode === 'tournament' && (st.humanBusted || st.gameOver)) { render(); showTourneyEnd(st); return; }
-    if (st.humanBusted) {
+    if (st.humanBusted && G.bankroll) {
+      syncChips(false); render();
+      var pick = await askRebuyBank();
+      if (gen !== loopGen) return;
+      if (pick !== 'rebuy') { leaveTable('busted'); if (pick === 'fresh') { Bankroll.restart(BR, Date.now(), 'fresh'); saveBR(); } showStart(); return; }
+      var amt = Bankroll.rebuy(BR); saveBR();
+      if (!amt) { leaveTable('busted'); showStart(); return; }
+      E.rebuy(G, HS, amt); sess.rebuys++; allStats.rebuys++; save(LS_STATS, allStats);
+      syncChips(false);
+      await drain(gen);
+    } else if (st.humanBusted) {
       render();
       var again = await askRebuy();
       if (gen !== loopGen) return;
@@ -1903,6 +2055,7 @@ async function gameLoop() {
     }
     await playHand(gen);
     if (gen !== loopGen) return;
+    syncChips(true);
     updateStreaks();
     afterHand();
     render();
@@ -1915,6 +2068,7 @@ async function playHand(gen) {
   hideCoach(); $('tableMsg').textContent = ''; seatTalk = {}; setStripLast('');
   Array.prototype.forEach.call(document.querySelectorAll('.bubble'), function (b) { b.remove(); });
   E.startHand(G);
+  syncChips(false);
   render();
   await drain(gen);
   while (!G.handOver) {
@@ -1933,12 +2087,14 @@ async function playHand(gen) {
       var actName = a.type === 'raise' ? 'raise' : a.type;
       decisions.push({ info: info, act: actName });
       E.applyAction(G, seat, a);
+      syncChips(false);
       if (!settings.coach) hideCoach();
     } else {
       var botAct = E.botDecide(G, seat); // decide first, then "think" longer on harder decisions
       await sleep(delay((0.45 + 1.1 * G.think) * (0.85 + Math.random() * 0.3)));
       if (gen !== loopGen) return;
       E.applyAction(G, seat, botAct);
+      syncChips(false);
     }
     await drain(gen);
   }
@@ -2035,14 +2191,69 @@ function showTab(t) {
 function openModal(html) { $('modal').innerHTML = html; $('overlay').hidden = false; $('modal').scrollTop = 0; $('overlay').scrollTop = 0; }
 function closeModal() { $('overlay').hidden = true; }
 var DISCLAIMER = '<div class="disclaimer"><b>Please note:</b> AI opponents are style models inspired by public reputations, not the real players. Their numbers are approximate style settings, not real statistics. For practice only, no real money.</div>';
+function bankBoxHTML() {
+  var h = '<div class="bank" id="bankBox">';
+  if (Bankroll.isBroke(BR)) {
+    h += '<div class="bankrow"><span>Your bankroll</span><b class="bad" id="bankAmt">$0</b></div><div class="banksub"><b class="bad">You\'re broke!</b> Start fresh with ' + money(Bankroll.START) + ' to play cash games again. Tournaments are free to play.</div>' +
+      '<div class="bankbtns"><button id="bFresh" class="go">Start fresh with ' + money(Bankroll.START) + '</button><button id="bHist">History</button></div>';
+  } else {
+    var buy = Bankroll.nextBuyIn(BR);
+    h += '<div class="bankrow"><span>Your bankroll</span><b id="bankAmt">' + money(BR.balance) + '</b></div><div class="banksub">' +
+      (buy < Bankroll.BUYIN ? 'You have less than ' + money(Bankroll.BUYIN) + ', so you will sit down with ' + money(buy) + '.' : 'Saved on this phone. Each cash table takes a ' + money(Bankroll.BUYIN) + ' buy-in from it.') + '</div>' +
+      '<div class="bankbtns"><button id="bHist">History</button><button id="bRestart" class="warnbtn">Restart bankroll</button></div>';
+  }
+  if (brNote && brNote.cashOut > 0) h += '<div class="banknote">The app was closed during your last cash game, so your ' + money(brNote.cashOut) + ' in chips went back to your bankroll.</div>';
+  return h + '</div>';
+}
+function wireBankBox() {
+  if ($('bHist')) $('bHist').onclick = tap(function () { showHistory(); });
+  if ($('bRestart')) $('bRestart').onclick = tap(function () { confirmRestart(); });
+  if ($('bFresh')) $('bFresh').onclick = tap(function () { brNote = null; Bankroll.restart(BR, Date.now(), 'fresh'); saveBR(); showStart(); });
+}
+function fmtDate(t) {
+  var d = new Date(t), m = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'][d.getMonth()];
+  var hr = d.getHours(), ap = hr >= 12 ? 'PM' : 'AM'; hr = hr % 12 || 12;
+  return m + ' ' + d.getDate() + ', ' + hr + ':' + ('0' + d.getMinutes()).slice(-2) + ' ' + ap;
+}
+function showHistory() {
+  var rows = BR.history.map(function (e) {
+    if (e.kind !== 'session') return '<tr class="hrestart"><td>' + fmtDate(e.date) + '</td><td colspan="2">' + (e.kind === 'fresh' ? 'Fresh start' : 'Restarted') + ' at ' + money(e.balance) + '</td></tr>';
+    var extra = e.hands + ' hand' + (e.hands === 1 ? '' : 's') + (e.rebuys ? ', ' + e.rebuys + ' rebuy' + (e.rebuys === 1 ? '' : 's') : '') + (e.how === 'closed' ? ', app closed' : e.how === 'busted' ? ', out of chips' : '');
+    return '<tr><td>' + fmtDate(e.date) + '<small>' + extra + '</small></td><td class="' + (e.result > 0 ? 'good' : e.result < 0 ? 'bad' : '') + '">' + signed(e.result) + '</td><td>' + money(e.balance) + '</td></tr>';
+  }).join('');
+  openModal('<h1>Bankroll history</h1><p>Bankroll now: <b>' + money(BR.balance) + '</b>. Newest sessions first.</p>' +
+    (rows ? '<table class="hist"><tr><th>Date</th><th>Result</th><th>Balance</th></tr>' + rows + '</table>' : '<p>No cash games yet. Sit down at a cash table to start your history.</p>') +
+    '<p style="margin-top:14px"><button class="bigbtn" id="bHistBack">Back</button></p>');
+  $('bHistBack').onclick = tap(function () { showStart(); });
+}
+function confirmRestart() {
+  openModal('<h1>Are you sure?</h1><p>Restart your bankroll at <b>' + money(Bankroll.START) + '</b>? Your current bankroll of <b>' + money(BR.balance) + '</b> will be replaced. Your history is kept.</p>' +
+    '<p class="btnline"><button class="bigbtn warnbtn" id="bRestartYes">Yes, restart</button><button class="bigbtn" id="bRestartNo" style="background:#34495e">Cancel</button></p>');
+  $('bRestartYes').onclick = tap(function () { brNote = null; Bankroll.restart(BR, Date.now(), 'restart'); saveBR(); showStart(); });
+  $('bRestartNo').onclick = tap(function () { showStart(); });
+}
+function showBroke(after) {
+  openModal('<h1>You\'re broke!</h1><p>Your bankroll is <b>$0</b>. Every poker player has been there. Start fresh with ' + money(Bankroll.START) + '?</p>' +
+    '<p class="btnline"><button class="bigbtn" id="bFresh2">Start fresh with ' + money(Bankroll.START) + '</button><button id="bBrokeBack" style="font-size:20px">Back to menu</button></p>');
+  $('bFresh2').onclick = tap(function () { brNote = null; Bankroll.restart(BR, Date.now(), 'fresh'); saveBR(); showStart(); });
+  $('bBrokeBack').onclick = tap(function () { showStart(); });
+}
+function askLeave() {
+  var me = G.players[HS], mid = !G.handOver && me.hole.length === 2 && !me.folded;
+  openModal('<h1>Leave the table?</h1><p>' + (mid ? 'You will fold this hand. ' : '') + 'Your <b>' + money(me.stack) + '</b> in chips go back to your bankroll.</p>' +
+    '<p class="btnline"><button class="bigbtn" id="bLeaveYes">Yes, leave</button><button class="bigbtn" id="bLeaveNo" style="background:#34495e">Keep playing</button></p>');
+  $('bLeaveYes').onclick = tap(function () { showStart(); });
+  $('bLeaveNo').onclick = tap(function () { closeModal(); });
+}
 function showStart() {
   loopGen++; humanResolve = null; nextResolve = null; closeSide();
+  leaveTable('left');
   var sel = settings.lineup.slice();
   function ch(id, key, opts) { return '<div class="choice" id="' + id + '">' + opts.map(function (o) { return '<button data-v="' + o[0] + '" class="' + (String(settings[key]) === String(o[0]) ? 'sel' : '') + '">' + o[1] + '</button>'; }).join('') + '</div>'; }
-  var h = '<h1>&#9824; Texas Hold\'em Poker Trainer</h1><p>Texas Hold\'em against computer opponents with famous playing styles. Practice your decisions with an optional coach.</p>' +
+  var h = '<h1>&#9824; Texas Hold\'em Poker Trainer</h1><div class="ver" id="verLabel">' + esc(APP_VERSION) + '</div>' + bankBoxHTML() + '<p>Texas Hold\'em against computer opponents with famous playing styles. Practice your decisions with an optional coach.</p>' +
     '<h2>1. How many opponents?</h2>' + ch('cNum', 'numOpp', [[5, '5'], [6, '6'], [7, '7'], [8, '8']]) +
     '<h2>2. Betting</h2>' + ch('cBet', 'betting', [['nl', 'No-Limit (bet any amount)'], ['limit', 'Fixed-Limit (set bet sizes)']]) +
-    '<h2>3. Game type</h2>' + ch('cMode', 'mode', [['cash', 'Cash game ($1/$2, $200 chips, rebuy anytime)'], ['tournament', 'Tournament (blinds go up every 10 hands)']]) +
+    '<h2>3. Game type</h2>' + ch('cMode', 'mode', [['cash', 'Cash game ($2/$5 blinds, ' + money(Bankroll.BUYIN) + ' buy-in from your bankroll)'], ['tournament', 'Tournament (blinds go up every 10 hands)']]) +
     '<h2>4. Opponents</h2>' + ch('cLine', 'lineupMode', [['random', 'Random lineup'], ['choose', 'Let me choose']]) +
     '<div id="lineupBox" style="margin-top:8px" ' + (settings.lineupMode === 'choose' ? '' : 'hidden') + '><p style="margin:4px 0;font-size:16px">Tick the opponents you want (any extra seats are filled at random):</p><div class="lineup">' +
     E.PROFILES.map(function (p) { return '<label><input type="checkbox" value="' + p.id + '" ' + (sel.indexOf(p.id) >= 0 ? 'checked' : '') + '><span class="lface">' + Faces.img(p.id, 'neutral') + '</span><span><b style="color:' + p.color + '">' + esc(p.name) + '</b> \u2013 ' + esc(p.tag) + '<br><small style="color:#b8c4ce">inspired by ' + esc(p.inspired) + '</small></span></label>'; }).join('') + '</div></div>' +
@@ -2053,6 +2264,7 @@ function showStart() {
     '<label class="chk"><input type="checkbox" id="oAuto" ' + (settings.autoDeal ? 'checked' : '') + '> Deal the next hand automatically</label>' +
     '<p style="margin-top:16px;display:flex;gap:10px;flex-wrap:wrap"><button class="bigbtn" id="bStart">Start game &#9654;</button><button id="bHelp2" style="font-size:20px">How to play</button></p>' + DISCLAIMER;
   openModal(h);
+  wireBankBox();
   function choice(id, key, conv) {
     Array.prototype.forEach.call(document.querySelectorAll('#' + id + ' button'), function (b) {
       b.onclick = function () { Array.prototype.forEach.call(document.querySelectorAll('#' + id + ' button'), function (x) { x.classList.remove('sel'); }); b.classList.add('sel'); settings[key] = conv ? conv(b.getAttribute('data-v')) : b.getAttribute('data-v'); if (id === 'cLine') $('lineupBox').hidden = settings.lineupMode !== 'choose'; };
@@ -2060,11 +2272,13 @@ function showStart() {
   }
   choice('cNum', 'numOpp', Number); choice('cMode', 'mode'); choice('cLine', 'lineupMode'); choice('cSpeed', 'speed'); choice('cBet', 'betting'); choice('cTalk', 'talk');
   $('bHelp2').onclick = function () { showHelp(showStart); };
-  $('bStart').onclick = function () {
+  $('bStart').onclick = tap(function () {
+    if (settings.mode === 'cash' && Bankroll.isBroke(BR)) { showBroke(); return; }
+    brNote = null;
     settings.coach = $('oCoach').checked; settings.fourColor = $('oFour').checked; settings.autoDeal = $('oAuto').checked;
     settings.lineup = Array.prototype.map.call(document.querySelectorAll('.lineup input:checked'), function (i) { return i.value; });
     save(LS_SET, settings); closeModal(); newGame();
-  };
+  });
 }
 function showHelp(back) {
   var ranks = [['Royal flush', 'As Ks Qs Js Ts', 'A-K-Q-J-10, all the same suit'], ['Straight flush', '9h 8h 7h 6h 5h', 'Five in a row, same suit'], ['Four of a kind', 'Qs Qh Qd Qc 4s', 'Four cards of the same rank'],
@@ -2072,15 +2286,16 @@ function showHelp(back) {
     ['Three of a kind', '8s 8h 8d Kc 3s', 'Three cards of the same rank'], ['Two pair', 'Jh Jc 4d 4s Ah', 'Two different pairs'], ['One pair', 'Th Td Ks 6c 2d', 'Two cards of the same rank'], ['High card', 'Ac Js 8d 5h 3c', 'Nothing else: highest card plays']];
   var h = '<h1>How to play</h1>' +
     '<h2>The goal</h2><p>Win chips by having the best five-card hand at the end, or by making everyone else fold. You get two private cards. Five shared cards are dealt face-up in the middle. Your hand is the best five cards out of your two plus the five shared cards.</p>' +
-    '<h2>How a hand goes</h2><ol><li><b>Blinds:</b> the two players left of the dealer button (D) put in forced bets: the small blind ($1) and big blind ($2).</li><li><b>Before the flop:</b> everyone gets two cards and decides to fold, call, or raise.</li><li><b>The flop:</b> three shared cards, then another round of betting.</li><li><b>The turn:</b> a fourth card and betting.</li><li><b>The river:</b> a fifth card and final betting.</li><li><b>Showdown:</b> remaining players show cards; the best hand wins. Equal hands split the pot.</li></ol>' +
+    '<h2>How a hand goes</h2><ol><li><b>Blinds:</b> the two players left of the dealer button (D) put in forced bets: the small blind and big blind. Cash games use $2/$5 blinds; tournaments start at $1/$2 and go up.</li><li><b>Before the flop:</b> everyone gets two cards and decides to fold, call, or raise.</li><li><b>The flop:</b> three shared cards, then another round of betting.</li><li><b>The turn:</b> a fourth card and betting.</li><li><b>The river:</b> a fifth card and final betting.</li><li><b>Showdown:</b> remaining players show cards; the best hand wins. Equal hands split the pot.</li></ol>' +
     '<h2>Your buttons</h2><p><b>Fold</b> = give up the hand. <b>Check</b> = pass without betting (only when nobody has bet). <b>Call</b> = match the current bet. <b>Bet / Raise</b> = put in more; use the slider, the &minus; and + buttons, or the quick buttons (&frac12; pot, &#8532; pot, pot, all-in). A raise must be at least as big as the previous bet or raise. If you are all-in, you can only win the part of the pot you matched (extra goes into a "side pot").</p>' +
-    '<h2>Fixed-Limit (optional mode)</h2><p>In Fixed-Limit every bet and raise is a set amount. Before the flop and on the flop it is the <b>small bet</b> (= the big blind, $2). On the turn and river it is the <b>big bet</b> (double, $4). Each betting round allows one bet plus three raises, then betting is <b>capped</b> (this cap also applies when only two players are left). The Raise button shows the exact amount; there is no slider.</p>' +
+    '<h2>Fixed-Limit (optional mode)</h2><p>In Fixed-Limit every bet and raise is a set amount. Before the flop and on the flop it is the <b>small bet</b> (= the big blind, $5 in a cash game). On the turn and river it is the <b>big bet</b> (double, $10). Each betting round allows one bet plus three raises, then betting is <b>capped</b> (this cap also applies when only two players are left). The Raise button shows the exact amount; there is no slider.</p>' +
     '<h2>On a phone</h2><p>Turn the phone sideways to see the whole table with just the action buttons. Upright, the strip under the table shows your hand (and the coach\'s numbers when Coach is on); tap it, or the Info button, for the full review, hand log, opponent notes and your stats. Opponents\' faces change with their mood: \uD83D\uDE0F smug after wins, \uD83E\uDDD0 focused while thinking, \uD83D\uDE23 frustrated after losses, \uD83D\uDE21 red-faced on tilt, \uD83E\uDD29 wild, \uD83D\uDE34 bored after folding. Table talk (Off / Some / Lots) is in Info: they may try to needle you. It is just talk; nobody can see your cards.</p>' +
     '<p>Keyboard (computer): <b>F</b> fold, <b>C</b> check/call, <b>R</b> bet/raise, <b>N</b> next hand.</p>' +
     '<h2>Hand rankings (best to worst)</h2><div class="rank-list">' + ranks.map(function (r) { return '<span>' + minis(E.parseCards(r[1])) + '</span><span><b>' + r[0] + '</b>: ' + r[2] + '</span>'; }).join('') + '</div>' +
     '<h2>Training features</h2><ul><li><b>Coach</b> (top bar): before each decision shows your chance of winning (<i>equity</i>), the <i>pot odds</i> (the winning chance you need for a call to pay off), and a simple suggestion. Or press <b>Hint</b> for one-time help.</li>' +
     '<li><b>Pot odds example:</b> calling $10 to win a $30 pot means you need 10 / (30+10) = 25%. If your equity is higher, calling is profitable over time.</li>' +
     '<li><b>Review</b> after each hand: how each of your decisions compares with the coach, and what opponents held.</li><li><b>Opponents</b> tab: each opponent\'s style, tips, and the stats you have observed (how many hands they play and raise).</li><li><b>My stats</b>: your results, saved on this device.</li></ul>' +
+    '<h2>Your bankroll</h2><p>You start with ' + money(Bankroll.START) + '. Each cash table takes a ' + money(Bankroll.BUYIN) + ' buy-in from it (or whatever is left if you have less). If you run out of chips you can rebuy from the bankroll or leave. When you leave the table, your chips go back into the bankroll. It is saved on this phone after every hand and works offline. If you close the app in the middle of a hand, that hand counts as a fold: chips already in the pot are lost, and the rest go back to your bankroll. At $0 you can start fresh, and the Restart bankroll button on the home screen sets it back to ' + money(Bankroll.START) + ' after asking first. Tournaments are separate and do not use the bankroll. Clearing the browser data or switching phones resets it.</p>' +
     '<h2>About the opponents</h2><p>Each computer player uses an approximate style model (how often they play hands, raise, bluff, and how big they bet), inspired by how these famous players are commonly described in poker media. They calculate their chances with quick simulations, consider pot odds and seat position, add some randomness, and adapt. Each one keeps track of how the whole table has played over the last 30 hands (who calls too much, who is very tight) and adjusts: bigger value bets and fewer bluffs against callers, more steals against tight players. They also change gears: an aggressive stretch now and then, tightening up after a big loss, tilting after a bad beat. Mood icons on their seats: \uD83D\uDD25 aggressive, \uD83E\uDDCA tight, \uD83D\uDE24 tilt, \u26A1 wild. See the Opponents tab for each player&#39;s current table read.</p>' + DISCLAIMER +
     '<p style="margin-top:14px"><button class="bigbtn" id="bCloseHelp">Got it</button></p>';
   openModal(h);
@@ -2091,6 +2306,22 @@ function askRebuy() {
     openModal('<h1>You\'re out of chips</h1><p>That happens to everyone! Would you like to rebuy for ' + money(G.startStack) + ' and keep playing?</p><p style="display:flex;gap:10px;flex-wrap:wrap"><button class="bigbtn" id="bRebuy">Rebuy ' + money(G.startStack) + '</button><button id="bQuit" style="font-size:20px">Back to menu</button></p>');
     $('bRebuy').onclick = function () { closeModal(); resolve(true); };
     $('bQuit').onclick = function () { closeModal(); resolve(false); };
+  });
+}
+function askRebuyBank() {
+  return new Promise(function (resolve) {
+    var amt = Bankroll.nextBuyIn(BR);
+    if (amt <= 0) {
+      openModal('<h1>You\'re broke!</h1><p>You\'re out of chips and your bankroll is <b>$0</b>. Every poker player has been there. Start fresh with ' + money(Bankroll.START) + '?</p>' +
+        '<p class="btnline"><button class="bigbtn" id="bFresh3">Start fresh with ' + money(Bankroll.START) + '</button><button id="bQuit" style="font-size:20px">Back to menu</button></p>');
+      $('bFresh3').onclick = tap(function () { closeModal(); resolve('fresh'); });
+      $('bQuit').onclick = tap(function () { closeModal(); resolve('leave'); });
+      return;
+    }
+    openModal('<h1>You\'re out of chips</h1><p>That happens to everyone! Your bankroll has <b>' + money(BR.balance) + '</b> left.' + (amt < Bankroll.BUYIN ? ' That is less than ' + money(Bankroll.BUYIN) + ', so you can rebuy for ' + money(amt) + '.' : '') + '</p>' +
+      '<p class="btnline"><button class="bigbtn" id="bRebuy">Rebuy ' + money(amt) + '</button><button id="bQuit" style="font-size:20px">Leave table</button></p>');
+    $('bRebuy').onclick = tap(function () { closeModal(); resolve('rebuy'); });
+    $('bQuit').onclick = tap(function () { closeModal(); resolve('leave'); });
   });
 }
 function showTourneyEnd(st) {
@@ -2114,13 +2345,21 @@ function newGame() {
   var ids = chosen.slice();
   while (ids.length < n) ids.push(rest.length ? rest.shift() : fill.shift());
   ids = shuffle(ids);
-  var players = [{ name: 'Tom', isHuman: true }].concat(ids.map(function (id) { return { profileId: id }; }));
-  G = E.createGame({ players: players, sb: 1, bb: 2, startStack: 200, mode: settings.mode, blindsEvery: settings.blindsEvery, sims: 260, betting: settings.betting, talk: TALK_LV[settings.talk] });
+  var cash = settings.mode === 'cash', buy = 0;
+  if (cash) {
+    leaveTable('left');
+    buy = Bankroll.buyIn(BR, Date.now()); saveBR();
+    if (!buy) { showBroke(); return; }
+  }
+  var players = [{ name: 'Tom', isHuman: true, stack: cash ? buy : undefined }].concat(ids.map(function (id) { return { profileId: id }; }));
+  // cash: $2/$5 blinds, $500 stacks for opponents, your buy-in comes from the bankroll. Tournament: unchanged ($1/$2, $200, blinds rise).
+  G = E.createGame({ players: players, sb: cash ? Bankroll.SB : 1, bb: cash ? Bankroll.BB : 2, startStack: cash ? Bankroll.BUYIN : 200, mode: settings.mode, blindsEvery: settings.blindsEvery, sims: 260, betting: settings.betting, talk: TALK_LV[settings.talk] });
+  G.bankroll = cash;
   HS = 0; sess = Object.assign({}, BLANK_STATS); reviews = []; streak = {}; seatTalk = {}; layoutKey = ''; stripLastHTML = '';
   allStats.games++; save(LS_STATS, allStats);
   $('tab-log').innerHTML = ''; $('reviewList').innerHTML = '<p>After each hand you will see a short review of your decisions here.</p>';
   updateTopButtons();
-  log('New ' + (settings.betting === 'limit' ? 'Fixed-Limit ' : 'No-Limit ') + (settings.mode === 'cash' ? 'cash game' : 'tournament') + ' with ' + n + ' opponents: ' + ids.map(function (id) { return E.profileById(id).name; }).join(', '), 'hh');
+  log('New ' + (settings.betting === 'limit' ? 'Fixed-Limit ' : 'No-Limit ') + (cash ? 'cash game, blinds $2/$5, you sat down with ' + money(buy) + ' (bankroll left ' + money(BR.balance) + ')' : 'tournament') + ' with ' + n + ' opponents: ' + ids.map(function (id) { return E.profileById(id).name; }).join(', '), 'hh');
   renderOpps(); renderStats();
   render();
   gameLoop();
@@ -2156,7 +2395,7 @@ function init() {
   $('btnSpeed').onclick = function () { var i = SPEEDS.findIndex(function (x) { return x.k === settings.speed; }); settings.speed = SPEEDS[(i + 1) % SPEEDS.length].k; save(LS_SET, settings); updateTopButtons(); };
   $('btnTalk').onclick = function () { var ks = ['off', 'some', 'lots'], i = ks.indexOf(settings.talk); settings.talk = ks[(i + 1) % 3]; save(LS_SET, settings); if (G) G.talkLevel = TALK_LV[settings.talk]; updateTopButtons(); };
   $('btnHelp').onclick = function () { showHelp(); };
-  var menu = function () { if (!G || G.handNo === 0 || confirm('Start a new game? (Your saved stats are kept.)')) showStart(); };
+  var menu = tap(function () { if (onCashTable()) askLeave(); else if (!G || G.handNo === 0 || confirm('Start a new game? (Your saved stats are kept.)')) showStart(); });
   $('btnMenu').onclick = menu; $('btnMenuL').onclick = menu;
   $('btnInfo').onclick = function () { openSide('review'); }; $('btnInfoL').onclick = function () { openSide('review'); };
   $('strip').onclick = function () { openSide('review'); };
@@ -2188,7 +2427,7 @@ window.PokerUI = { layout: function () { return LAY; }, game: function () { retu
 </script>
 <script>
 if ('serviceWorker' in navigator && location.protocol !== 'file:') {
-  window.addEventListener('load', function () { navigator.serviceWorker.register('sw.js').catch(function (e) { console.warn('Service worker not registered', e); }); });
+  window.addEventListener('load', function () { navigator.serviceWorker.register('sw.js', { updateViaCache: 'none' }).then(function (r) { r.update(); }).catch(function (e) { console.warn('Service worker not registered', e); }); });
 }
 </script>
 </body></html>
