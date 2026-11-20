@@ -529,9 +529,9 @@ var PROFILES = [
       fold: ['I\'ll make my cards disappear.'], allin: ['Let\'s put on a show. All in!'], greet: ['Ladies and gentlemen, welcome to the show!'] } },
   { id: 'selbst', name: 'Selbst', inspired: 'Vanessa Selbst', tag: 'Very aggressive', color: '#f06292',
     summary: 'Very aggressive. Re-raises (3-bets) often, makes big bluffs, and attacks any sign of weakness. Adapts strongly to opponents.',
-    vpip: .32, pfr: .27, threeBet: .13, af: 3.8, cbet: .78, bluff: .28, foldTo3bet: .32, checkRaise: .16, riverBluff: .30, callDown: .05,
-    sizes: [.66, .9, 1.0], overbet: .20, openSize: 2.5, tilt: .05, adapt: .9, talkFreq: .1,
-    targets: { wtsd: .27, overbet: .18, bluffSd: .25 }, source: 'No tracked numbers found (qualitative): very aggressive, widens 3-bets against cautious players to isolate them (Card Player, PokerPlayer interview)',
+    vpip: .28, pfr: .24, threeBet: .13, af: 3.0, cbet: .78, bluff: .12, foldTo3bet: .45, checkRaise: .12, riverBluff: .10, callDown: .14,
+    sizes: [.6, .8, 1.0], overbet: .08, openSize: 2.5, tilt: .05, adapt: .9, talkFreq: .1,
+    targets: { wtsd: .27, overbet: .08, bluffSd: .16 }, source: 'No tracked numbers found (qualitative): very aggressive, widens 3-bets against cautious players to isolate them (Card Player, PokerPlayer interview). Bluff and overbet rates were toned down in v3.1 so the style stays aggressive without being a money-losing maniac.',
     talk: { raise: ['Raise.', 'I don\'t think you have it.'], win: ['Thanks.'], badbeat: ['Nice river.'], allin: ['All in.'], greet: [] } },
   { id: 'seidel', name: 'Seidel', inspired: 'Erik Seidel', tag: 'Quiet, solid', color: '#4db6ac',
     summary: 'Quiet, tight and solid. Rarely out of line. Precise value bets: when he bets big on the river he usually has it.',
@@ -1794,7 +1794,7 @@ var allStats = load(LS_STATS, BLANK_STATS);
 var sess = Object.assign({}, BLANK_STATS);
 
 /* ---------- bankroll (cash games only; see src/bankroll.js) ---------- */
-var APP_VERSION = 'v3 - Nov 20 - 15d46a7';
+var APP_VERSION = 'v3.1 - Nov 20 - 9999784';
 var STORE = (function () { try { var t = window.localStorage; t.getItem('x'); return t; } catch (e) { var m = {}; return { getItem: function (k) { return k in m ? m[k] : null; }, setItem: function (k, v) { m[k] = String(v); } }; } })();
 Bankroll.setPlayers(E.PROFILES.map(function (p) { return p.id; }));
 var BR = Bankroll.load(STORE, Date.now());
